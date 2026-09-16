@@ -1101,7 +1101,9 @@ namespace visage {
       }
       else if (event.xany.window == window_handle_ && event.type == ClientMessage &&
                event.xclient.message_type == x11_->timerEvent()) {
-        if (!timer_fired) {
+        // With an external draw driver (CLAP host timer) the internal timer
+        // messages only wake the fd — the host timer schedules the renders.
+        if (!externalDrawDriver() && !timer_fired) {
           timer_fired = true;
           long long microseconds = time::microseconds() - start_draw_microseconds_;
           drawCallback(microseconds / 1000000.0);

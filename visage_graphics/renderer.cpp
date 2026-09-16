@@ -26,6 +26,8 @@
 #include <bgfx/bgfx.h>
 #include <bgfx/platform.h>
 
+#include <cstdio>
+
 namespace visage {
   class GraphicsCallbackHandler : public bgfx::CallbackI {
     void fatal(const char* file_path, uint16_t line, bgfx::Fatal::Enum _code, const char* error) override {
@@ -64,6 +66,10 @@ namespace visage {
 #elif VISAGE_MAC
     return BGFX_RESET_FLIP_AFTER_RENDER | BGFX_RESET_VSYNC;
 #elif VISAGE_LINUX
+    // Keep vsync: Reaper on Linux dispatches CLAP timers + plugin fds at its
+    // own ~30 Hz main-loop rate regardless of the callback duration, so the
+    // UI cadence is host-capped at ~28-30 fps either way — vsync just avoids
+    // tearing on that same cadence.
     return BGFX_RESET_VSYNC;
 #else
     return 0;
@@ -151,9 +157,27 @@ namespace visage {
       error_message_ = renderer_name + " is required and not supported on this computer.";
     }
 
+    // CrossZone diagnostic: report requested vs created renderer so a GL
+    // fallback inside Reaper is visible instead of a crash on first submit.
+    {
+      FILE* f = std::fopen("/tmp/crosszone-renderer.log", "a");
+      if (f) {
+        std::fprintf(f, "requested type: %d supported: %d\n", (int) bgfx_init.type, (int) supported_);
+        std::fclose(f);
+      }
+    }
+
     bgfx::init(bgfx_init);
     VISAGE_ASSERT(bgfx::getRendererType() == bgfx_init.type);
     swap_chain_supported_ = bgfx::getCaps()->supported & BGFX_CAPS_SWAP_CHAIN;
+
+    {
+      FILE* f = std::fopen("/tmp/crosszone-renderer.log", "a");
+      if (f) {
+        std::fprintf(f, "created type: %d (Vulkan=9, OpenGL=8)\n", (int) bgfx::getRendererType());
+        std::fclose(f);
+      }
+    }
   }
 
   void Renderer::resetResolution(int width, int height) {

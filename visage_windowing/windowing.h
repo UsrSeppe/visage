@@ -123,6 +123,12 @@ namespace visage {
         draw_callback_(time);
     }
 
+    /** When set, the platform's internal draw timer (X11 ClientMessage) no
+     *  longer drives renders — the embedder (e.g. a CLAP host timer) calls
+     *  drawCallback() itself on the main thread. */
+    void setExternalDrawDriver(bool on) { external_draw_driver_ = on; }
+    bool externalDrawDriver() const { return external_draw_driver_; }
+
     bool isVisible() const { return visible_; }
 
     IPoint lastWindowMousePosition() const { return last_window_mouse_position_; }
@@ -202,6 +208,7 @@ namespace visage {
     float dpi_scale_ = 1.0f;
     bool visible_ = true;
     bool mouse_relative_mode_ = false;
+    bool external_draw_driver_ = false;
     int client_width_ = 0;
     int client_height_ = 0;
 
