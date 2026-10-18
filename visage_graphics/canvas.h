@@ -542,7 +542,7 @@ namespace visage {
         return;
 
       addShape(PathFillWrapper(state_.clamp, state_.brush, retained.x, retained.y,
-                               retained.width, retained.height, retained.packed_path));
+                               retained.width, retained.height, pathAtlas(), retained.packed_path));
     }
 
     template<typename T1, typename T2, typename T3, typename T4, typename T5>

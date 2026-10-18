@@ -194,8 +194,16 @@ namespace visage {
   }
 
   void setPathDataUniform(const BatchVector<PathFillWrapper>& batches) {
-    if (!batches.empty() && !batches[0].shapes->empty())
-      setPathAtlasUniform(batches[0].shapes->front().path_atlas);
+    if (batches.empty() || batches[0].shapes->empty())
+      return;
+
+    // A batch binds its atlas texture from its first shape, so a shape with no
+    // atlas — e.g. a retained fill constructed without one — would dereference
+    // null in frameBufferHandle(). Skip it instead of taking the host down.
+    if (PathAtlas* atlas = batches[0].shapes->front().path_atlas)
+      setPathAtlasUniform(atlas);
+    else
+      VISAGE_LOG("setPathDataUniform: PathFillWrapper with no path atlas");
   }
 
   inline int numTextPieces(const TextBlock& text, int x, int y, const std::vector<IBounds>& invalid_rects) {
