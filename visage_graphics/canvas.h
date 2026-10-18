@@ -485,6 +485,66 @@ namespace visage {
 
     void fill(const Path& path) { fill(path, 0, 0); }
 
+    /** A path fill retained in this canvas' path atlas: it is rasterised once and
+     *  later frames only re-draw one quad, instead of re-packing the path every
+     *  region redraw (the per-frame cost that starves the shared transient buffer).
+     *  Get one from retainFill() and draw with fill(RetainedPathFill); check it
+     *  with retainedFillValid() first — the handle is only good for the canvas and
+     *  the canvas offset/scale it was retained with. */
+    struct RetainedPathFill {
+      PathAtlas::PackedPath packed_path;
+      float x = 0.0f;
+      float y = 0.0f;
+      float width = 0.0f;
+      float height = 0.0f;
+      const Canvas* canvas = nullptr;
+      float origin_x = 0.0f;
+      float origin_y = 0.0f;
+      float scale = 1.0f;
+    };
+
+    /** Rasterise `path` into the atlas now and return the geometry needed to draw
+     *  it (see RetainedPathFill). Mirrors fill(path)'s origin/bounding-box law, so
+     *  a retained fill lands exactly where the immediate one would have. */
+    RetainedPathFill retainFill(const Path& path) {
+      RetainedPathFill retained;
+      const Path adjusted_path = state_.scale == 1.0f ? path : path.scaled(state_.scale);
+      const Bounds bounding_box = adjusted_path.boundingBox();
+      retained.x = static_cast<float>(static_cast<int>(state_.x + bounding_box.x() - PathFillWrapper::kBuffer));
+      retained.y = static_cast<float>(static_cast<int>(state_.y + bounding_box.y() - PathFillWrapper::kBuffer));
+      retained.width = std::ceil(state_.x + bounding_box.right() + PathFillWrapper::kBuffer) - retained.x;
+      retained.height = std::ceil(state_.y + bounding_box.bottom() + PathFillWrapper::kBuffer) - retained.y;
+      retained.canvas = this;
+      retained.origin_x = state_.x;
+      retained.origin_y = state_.y;
+      retained.scale = state_.scale;
+      const float shift_x = retained.x - state_.x;
+      const float shift_y = retained.y - state_.y;
+      retained.packed_path = path_atlas_.addPath(adjusted_path.translated(-shift_x, -shift_y),
+                                                 static_cast<int>(retained.width),
+                                                 static_cast<int>(retained.height));
+      return retained;
+    }
+
+    /** True when `retained` may still be drawn here: it belongs to this canvas, the
+     *  canvas origin/scale it was retained with are unchanged (otherwise the quad
+     *  would land at the old position on a resize/re-layout), and its atlas entry
+     *  is still alive (the atlas dies with its canvas — a layer cached across a
+     *  window teardown must not draw the old handle). */
+    bool retainedFillValid(const RetainedPathFill& retained) const {
+      return retained.canvas == this && retained.origin_x == state_.x && retained.origin_y == state_.y &&
+             retained.scale == state_.scale && retained.packed_path.valid();
+    }
+
+    /** Draw a retained path fill (see retainFill): one quad, no re-pack. */
+    void fill(const RetainedPathFill& retained) {
+      if (retained.width <= 0.0f || retained.height <= 0.0f || !retained.packed_path.valid())
+        return;
+
+      addShape(PathFillWrapper(state_.clamp, state_.brush, retained.x, retained.y,
+                               retained.width, retained.height, retained.packed_path));
+    }
+
     template<typename T1, typename T2, typename T3, typename T4, typename T5>
     void stroke(const Path& path, const T1& x, const T2& y, const T3& width, const T4& height,
                 const T5& stroke_width, Path::Join join = Path::Join::Round,

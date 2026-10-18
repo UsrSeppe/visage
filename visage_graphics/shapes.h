@@ -584,8 +584,16 @@ namespace visage {
       packed_path = atlas->addPath(std::move(adjusted_path), new_width, new_height);
     }
 
+    /** Retained variant: the path already lives in the atlas (uploaded once via
+     *  Canvas::retainFill), so drawing it costs one quad and never re-packs.
+     *  `x`/`y`/`width`/`height` are the geometry returned by retainFill. */
+    PathFillWrapper(const ClampBounds& clamp, const PackedBrush* brush, float x, float y,
+                    float width, float height, PathAtlas::PackedPath packed) :
+        Shape(batchId(), clamp, brush, x, y, width, height), packed_path(std::move(packed)) { }
+
     void setVertexData(Vertex* vertices) const {
-      path_atlas->setPathAtlasCoordinates(vertices, packed_path);
+      // Qualified: the retained variant has no owning atlas pointer.
+      PathAtlas::setPathAtlasCoordinates(vertices, packed_path);
       float even_odd = packed_path.path().fillRule() == Path::FillRule::EvenOdd ? 1.0f : 0.0f;
       for (int i = 0; i < kVerticesPerQuad; ++i)
         vertices[i].direction_x = even_odd;

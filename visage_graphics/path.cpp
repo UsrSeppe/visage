@@ -27,6 +27,7 @@
 #include "uniforms.h"
 
 #include <bgfx/bgfx.h>
+#include <algorithm>
 #include <complex>
 #include <memory>
 
@@ -650,6 +651,10 @@ namespace visage {
     bgfx::setViewFrameBuffer(submit_pass, frame_buffer_->handle);
     bgfx::setState(BGFX_STATE_WRITE_R | BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_ONE, BGFX_STATE_BLEND_ZERO));
     auto clear_vertices = initQuadVertices<UvVertex>(total_need_update);
+    if (clear_vertices == nullptr) {
+      VISAGE_LOG("PathAtlas::clearUpdatedPathAreas: Failed to allocate transient buffers");
+      return false;
+    }
     int vertex_index = 0;
     for (auto& path : paths_) {
       if (path->needs_update) {
@@ -688,6 +693,20 @@ namespace visage {
     return true;
   }
 
+  namespace {
+    /** Triangles emitted for one packed path: one per point of every sub-path with
+     *  more than two points. Shared by the size estimate and the emit loop so the
+     *  two can never disagree. */
+    int pathTriangles(const PathAtlas::PackedPathRect& packed_path) {
+      int triangles = 0;
+      for (const auto& sub_path : packed_path.path.subPaths()) {
+        if (sub_path.points.size() > 2)
+          triangles += static_cast<int>(sub_path.points.size());
+      }
+      return triangles;
+    }
+  }  // namespace
+
   int PathAtlas::updatePaths(int submit_pass) {
     constexpr int kTriangleIndices[] = { 0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5 };
     constexpr int kConservativeVerticesPerTriangle = 3;
@@ -701,12 +720,8 @@ namespace visage {
 
     int num_triangles = 0;
     for (auto& path : paths_) {
-      if (path->needs_update) {
-        for (const auto& sub_path : path->path.subPaths()) {
-          if (sub_path.points.size() > 2)
-            num_triangles += sub_path.points.size();
-        }
-      }
+      if (path->needs_update)
+        num_triangles += pathTriangles(*path);
     }
 
     auto state = BGFX_STATE_WRITE_R | BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_ONE, BGFX_STATE_BLEND_ONE);
@@ -720,6 +735,27 @@ namespace visage {
       indices_per_triangle = 3;
       vertices_per_point = 1;
     }
+
+    // bgfx's transient vertex/index buffers are ONE per-frame bump allocator shared
+    // by every draw in the frame, so an over-sized path set cannot be split across
+    // extra allocations. Degrade instead of dropping the whole pass: the old
+    // `return submit_pass + 1` blanked every path in the window (the 24-band EQ page
+    // needs ~55k points and silently lost all of them). Draw the paths that fit and
+    // leave the remainder `needs_update` for the next frame's fresh budget.
+    const int vertex_stride = vertices_per_triangle;
+    const uint32_t available_vertices = bgfx::getAvailTransientVertexBuffer(
+        static_cast<uint32_t>(num_triangles * vertex_stride), PathVertex::layout());
+    const uint32_t available_indices = bgfx::getAvailTransientIndexBuffer(
+        static_cast<uint32_t>(num_triangles * indices_per_triangle), true);
+    const uint32_t fit_triangles = std::min(available_vertices / static_cast<uint32_t>(vertex_stride),
+                                            available_indices / static_cast<uint32_t>(indices_per_triangle));
+    if (fit_triangles < static_cast<uint32_t>(num_triangles)) {
+      VISAGE_LOG("PathAtlas::updatePaths: transient buffers short (%d of %d triangles)",
+                 static_cast<int>(fit_triangles), num_triangles);
+      num_triangles = static_cast<int>(fit_triangles);
+    }
+    if (num_triangles == 0)
+      return submit_pass + 1;
 
     bgfx::setState(state);
     bgfx::TransientVertexBuffer vertex_buffer {};
@@ -746,6 +782,12 @@ namespace visage {
     uint32_t triangle_index = 0;
     for (auto& path : paths_) {
       if (path->needs_update) {
+        // A path must fit whole (a partial sub-path would draw broken geometry);
+        // anything that does not stays dirty and is retried next frame.
+        if (vertex + static_cast<uint32_t>(pathTriangles(*path) * vertices_per_triangle) >
+            static_cast<uint32_t>(num_vertices))
+          continue;
+
         path->needs_update = false;
 
         for (const auto& sub_path : path->path.subPaths()) {
@@ -801,8 +843,8 @@ namespace visage {
       }
     }
 
-    VISAGE_ASSERT(vertex == num_vertices);
-    VISAGE_ASSERT(triangle_index == num_indices);
+    VISAGE_ASSERT(vertex <= static_cast<uint32_t>(num_vertices));
+    VISAGE_ASSERT(triangle_index <= static_cast<uint32_t>(num_indices));
 
     bool origin_flip = bgfx::getCaps()->originBottomLeft;
     setPathUniform<Uniforms::kColor>(1.0f);
@@ -840,6 +882,10 @@ namespace visage {
                                                       bgfx::TextureFormat::R16F, kFlags);
       width_ = atlas_map_.width();
       height_ = atlas_map_.height();
+      // A fresh texture is blank, so every path (including retained ones that were
+      // already uploaded) must be rasterised again.
+      for (auto& path : paths_)
+        path->needs_update = true;
     }
   }
 

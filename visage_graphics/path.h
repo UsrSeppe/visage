@@ -653,6 +653,12 @@ namespace visage {
         return reference_->packed_path_rect;
       }
 
+      /** False once the owning atlas has been destroyed (the weak pointer expires
+       *  with it), in which case every accessor above would dereference freed
+       *  memory. A handle that outlives its Canvas — e.g. one cached by a layer
+       *  across a window teardown — must be tested with this before use. */
+      bool valid() const { return reference_ && reference_->atlas.lock() != nullptr; }
+
     private:
       std::shared_ptr<PackedPathReference> reference_;
     };
