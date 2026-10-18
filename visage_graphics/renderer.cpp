@@ -121,6 +121,16 @@ namespace visage {
     bgfx_init.resolution.height = 0;
     bgfx_init.callback = callback_handler_.get();
 
+    // CrossZone: PathAtlas::updatePaths() uploads every changed path in the window
+    // into a single bgfx transient buffer each frame and, if the total does not
+    // fit, drops *every* path in that window (all-or-nothing). A busy EQ page
+    // (24 band curves = fill + stroked outline, ~1536 points/band) needs ~55k
+    // points, i.e. ~11 MB of the 32-byte PathVertex stream, which overruns the
+    // bgfx defaults (6 MB vertex / 2 MB index = 32768 points) at ~10 bands.
+    // Raise both buffers so the full band count fits with headroom.
+    bgfx_init.limits.transientVbSize = 16 << 20;
+    bgfx_init.limits.transientIbSize = 6 << 20;
+
     bgfx_init.platformData.ndt = display;
     bgfx_init.platformData.nwh = model_window;
     bgfx_init.platformData.type = bgfx::NativeWindowHandleType::Default;
