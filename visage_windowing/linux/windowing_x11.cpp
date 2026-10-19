@@ -32,6 +32,9 @@
 
 namespace visage {
   static std::string _clipboard_text;
+  // Timestamp of the last real X event on this connection. ICCCM §2.4 forbids
+  // CurrentTime for ConvertSelection; owners reject it, so track a real time.
+  static Time _last_event_time = CurrentTime;
 
   class NativeWindowLookup {
   public:
@@ -86,6 +89,9 @@ namespace visage {
       ::Display* display = x11->display();
       window_handle_ = XCreateSimpleWindow(display, x11->rootWindow(), -100, -100, 1, 1, 0, 0, 0);
       XSelectInput(display, window_handle_, StructureNotifyMask);
+      // NOTE: do NOT XMapWindow() this helper — KDE/Wayland then shows it as a
+      // second top-level window. It stays an unmapped helper; the CLAP wrapper's
+      // clipboard reader uses the plugin's own mapped window as requestor.
       XFlush(display);
     }
 
@@ -114,8 +120,12 @@ namespace visage {
       return _clipboard_text;
 
     Atom selection_property = XInternAtom(display, "VISAGE_SELECT", False);
+    // ICCCM §2.4: do NOT use CurrentTime for ConvertSelection (owners reject
+    // it). Use the last real event time, falling back to CurrentTime only if
+    // no event has been seen yet.
+    const Time request_time = (_last_event_time != CurrentTime) ? _last_event_time : CurrentTime;
     XConvertSelection(display, x11->clipboard(), x11->utf8String(), selection_property,
-                      SharedMessageWindow::handle(), CurrentTime);
+                      SharedMessageWindow::handle(), request_time);
 
     XEvent event;
     for (int i = 0; i < kTries; ++i) {
@@ -1151,6 +1161,10 @@ namespace visage {
   }
 
   void WindowX11::processEvent(XEvent& event) {
+    if (event.type == ButtonPress || event.type == ButtonRelease ||
+        event.type == MotionNotify || event.type == KeyPress || event.type == KeyRelease)
+      _last_event_time = event.xbutton.time;
+
     switch (event.type) {
     case ClientMessage: {
       X11Connection::DisplayLock lock(x11_);
@@ -1314,6 +1328,12 @@ namespace visage {
         handleMouseWheel(x, y, event.xbutton.x, event.xbutton.y, mouseButtonState(), modifierState());
       }
       else {
+        // A click into the plugin editor must claim X keyboard focus, or key
+        // events (typing, Ctrl+V) keep going to the host — text fields in
+        // embedded plugin windows never receive them otherwise (the JUCE
+        // "Linux plugin editor steals/never-takes X focus" class of bug).
+        XSetInputFocus(x11_->display(), window_handle_, RevertToParent, event.xbutton.time);
+
         MouseButton button = buttonFromEvent(event);
         if (button == kMouseButtonNone)
           passEventToParent(event);
