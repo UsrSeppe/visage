@@ -343,7 +343,7 @@ namespace visage {
   if (!view.currentDrawable || !view.currentRenderPassDescriptor)
     return;
 
-  view.layer.contentsScale = self.visage_window->dpiScale();
+  view.layer.contentsScale = self.visage_window->layerScale();
   [self drawWindow];
 }
 @end
@@ -461,13 +461,13 @@ namespace visage {
   NSPoint location = [event locationInWindow];
   NSPoint view_location = [self convertPoint:location fromView:nil];
   CGFloat view_height = self.frame.size.height;
-  return visage::Point(view_location.x, view_height - view_location.y) * self.visage_window->dpiScale();
+  return visage::Point(view_location.x, view_height - view_location.y) * self.visage_window->layerScale();
 }
 
 - (visage::Point)dragPosition:(id<NSDraggingInfo>)sender {
   NSPoint drag_point = [self convertPoint:[sender draggingLocation] fromView:nil];
   CGFloat view_height = self.frame.size.height;
-  return visage::Point(drag_point.x, view_height - drag_point.y) * self.visage_window->dpiScale();
+  return visage::Point(drag_point.x, view_height - drag_point.y) * self.visage_window->layerScale();
 }
 
 - (NSPoint)mouseScreenPosition {
@@ -885,6 +885,7 @@ namespace visage {
   WindowMac::WindowMac(int x, int y, int width, int height, float scale, Decoration decoration) :
       Window(width, height), decoration_(decoration) {
     setDpiScale(scale);
+    layer_scale_ = scale;
     last_content_rect_ = NSMakeRect(x / scale, y / scale, width / scale, height / scale);
     NSRect rect = last_content_rect_;
 
@@ -903,7 +904,16 @@ namespace visage {
       Window(width, height) {
     setDpiScale(scale);
     parent_view_ = (__bridge NSView*)parent_handle;
-    CGRect view_frame = CGRectMake(0.0f, 0.0f, width / scale, height / scale);
+    // The host sizes/provides the view in POINTS while the drawable is
+    // backing-scaled; the embedder owns `dpiScale` (UI zoom x backing), so this
+    // only converts native px <-> points for the frame/mouse.
+    layer_scale_ = 1.0f;
+    NSWindow* parent_window = [parent_view_ window];
+    if (parent_window && [parent_window backingScaleFactor] > 0.0)
+      layer_scale_ = [parent_window backingScaleFactor];
+    else if ([[NSScreen mainScreen] backingScaleFactor] > 0.0)
+      layer_scale_ = [[NSScreen mainScreen] backingScaleFactor];
+    CGRect view_frame = CGRectMake(0.0f, 0.0f, width / layer_scale_, height / layer_scale_);
 
     view_ = [[VisageAppView alloc] initWithFrame:view_frame inWindow:this];
     view_delegate_ = [[VisageAppViewDelegate alloc] initWithWindow:this];
@@ -946,6 +956,7 @@ namespace visage {
 
     window_handle_ = window;
     setDpiScale([window_handle_ backingScaleFactor]);
+    layer_scale_ = dpiScale();
     int client_width = std::round(last_content_rect_.size.width * dpiScale());
     int client_height = std::round(last_content_rect_.size.height * dpiScale());
     handleResized(client_width, client_height);
@@ -975,8 +986,19 @@ namespace visage {
   }
 
   void WindowMac::resetBackingScale() {
-    if (window_handle_)
-      setDpiScale([window_handle_ backingScaleFactor]);
+    if (!window_handle_)
+      return;
+    if (parent_view_) {
+      // Plugin embed: the host view is sized in POINTS and the drawable is
+      // backing-scaled. The wrapper owns `dpiScale` (= UI zoom x this scale),
+      // so never reset it here; only track the display's backing scale.
+      const float backing = [window_handle_ backingScaleFactor];
+      if (backing > 0.f)
+        layer_scale_ = backing;
+      return;
+    }
+    setDpiScale([window_handle_ backingScaleFactor]);
+    layer_scale_ = dpiScale();
   }
 
   void WindowMac::windowContentsResized(int width, int height) {
@@ -984,8 +1006,8 @@ namespace visage {
     int x = frame.origin.x;
     int y = frame.origin.y;
 
-    float w = width / dpiScale();
-    float h = height / dpiScale();
+    float w = width / layer_scale_;
+    float h = height / layer_scale_;
     Point borders = windowBorderSize(window_handle_);
     frame.size.width = w + borders.x;
     frame.size.height = h + borders.y;

@@ -139,6 +139,13 @@ namespace visage {
     void setDpiScale(float scale) { dpi_scale_ = scale; }
     float dpiScale() const { return dpi_scale_; }
 
+    /** Drawable px per POINT (the display's backing scale). Different from
+     *  `dpiScale()` (native px per LOGICAL unit): on a mac plugin embed the
+     *  host sizes the view in points while the drawable is backing-scaled, so
+     *  the embedder must map its logical dpi across this scale. Defaults to 1
+     *  (native units are already points = px on X11/Windows). */
+    virtual float layerScale() const { return 1.0f; }
+
     IPoint convertToNative(const Point& logical_point) const {
       return { static_cast<int>(std::round(logical_point.x * dpi_scale_)),
                static_cast<int>(std::round(logical_point.y * dpi_scale_)) };

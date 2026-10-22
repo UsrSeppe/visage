@@ -93,6 +93,16 @@ namespace visage {
     void handleNativeResize(int width, int height);
     bool isPopup() const { return decoration_ == Decoration::Popup; }
 
+    /** Drawable px per POINT (the display's backing scale). Distinct from
+     *  `dpiScale()`, which is native px per LOGICAL unit: a plugin window
+     *  embeds with backing 1 (the project pins the UI to 1 px/point) while the
+     *  wrapper uses `dpiScale()` as the UI zoom for the editor/canvas mapping.
+     *  The view frame, drawable size and mouse coords must use this scale, or
+     *  `setNativeWindowSize(base * zoom)` divides the view back to `base`
+     *  points and a 125 % window grows around an unchanged plugin (black
+     *  bands). */
+    float layerScale() const override { return layer_scale_; }
+
   private:
     static bool running_event_loop_;
     NSWindow* window_handle_ = nullptr;
@@ -101,6 +111,7 @@ namespace visage {
     VisageAppViewDelegate* view_delegate_ = nullptr;
     NSRect last_content_rect_ {};
     Decoration decoration_ = Decoration::Native;
+    float layer_scale_ = 1.0f;
   };
 }
 
