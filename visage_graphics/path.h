@@ -735,6 +735,7 @@ namespace visage {
     int height_ = 0;
     bool needs_packing_ = false;
     std::shared_ptr<PathAtlas*> reference_;
+    bool reported_missing_atlas_ = false;
 
     VISAGE_LEAK_CHECKER(PathAtlas)
   };

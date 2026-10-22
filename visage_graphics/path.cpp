@@ -28,8 +28,32 @@
 
 #include <bgfx/bgfx.h>
 #include <algorithm>
+#include <chrono>
 #include <complex>
+#include <cstdlib>
 #include <memory>
+#include <string>
+#include <sys/stat.h>
+
+namespace {
+  /** TEMP-DIAG (fan-streak bisect). Presence of `~/crosszone-<name>` disables a
+   *  paint layer in a RUNNING host, so the user can bisect without a rebuild.
+   *  See docs/bugs/2026-10-21-gain-history-fan-streaks.md. Drop when closed. */
+  bool pathDiagTrigger(const char* name) {
+    static int last_ms = -1;
+    static bool cached = false;
+    const auto now_ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (last_ms < 0 || now_ms - last_ms > 250) {
+      last_ms = now_ms;
+      const char* home = std::getenv("HOME");
+      struct stat st {};
+      cached = home && ::stat((std::string(home) + "/" + name).c_str(), &st) == 0;
+    }
+    return cached;
+  }
+}  // namespace
 
 namespace visage {
   static float toFloat(const std::string& str) {
@@ -645,16 +669,18 @@ namespace visage {
     float width_scale = 2.0f / width_;
     float height_scale = 2.0f / height_;
 
-    bgfx::setViewMode(submit_pass, bgfx::ViewMode::Sequential);
-    bgfx::setViewRect(submit_pass, 0, 0, width_, height_);
-    bgfx::setViewClear(submit_pass, BGFX_CLEAR_NONE);
-    bgfx::setViewFrameBuffer(submit_pass, frame_buffer_->handle);
-    bgfx::setState(BGFX_STATE_WRITE_R | BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_ONE, BGFX_STATE_BLEND_ZERO));
+    // Allocate first: configuring the view and then bailing out would leave the
+    // view pointing at the atlas framebuffer for whoever submits it next.
     auto clear_vertices = initQuadVertices<UvVertex>(total_need_update);
     if (clear_vertices == nullptr) {
       VISAGE_LOG("PathAtlas::clearUpdatedPathAreas: Failed to allocate transient buffers");
       return false;
     }
+    bgfx::setViewMode(submit_pass, bgfx::ViewMode::Sequential);
+    bgfx::setViewRect(submit_pass, 0, 0, width_, height_);
+    bgfx::setViewClear(submit_pass, BGFX_CLEAR_NONE);
+    bgfx::setViewFrameBuffer(submit_pass, frame_buffer_->handle);
+    bgfx::setState(BGFX_STATE_WRITE_R | BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_ONE, BGFX_STATE_BLEND_ZERO));
     int vertex_index = 0;
     for (auto& path : paths_) {
       if (path->needs_update) {
@@ -714,6 +740,33 @@ namespace visage {
     constexpr float kTriangleDrawOffset = 2.0f;
 
     checkInit();
+
+    // TEMP-DIAG (fan-streak bisect): skip the whole rasterisation pass. The
+    // atlas keeps its last content, so path fills freeze; if the on-screen
+    // streaks vanish, they are drawn by THIS pass (leaking to the backbuffer)
+    // and not baked into the atlas.
+    if (pathDiagTrigger("crosszone-nopaths")) {
+      static bool logged = false;
+      if (! logged) {
+        logged = true;
+        VISAGE_LOG("PathAtlas: ~/crosszone-nopaths present, rasterisation disabled");
+      }
+      return submit_pass + 1;
+    }
+
+    // Without a live atlas framebuffer the pass below would be submitted with no
+    // render target, i.e. bgfx draws the rasterisation TRIANGLE FANS straight
+    // into the backbuffer: the grey fan of spokes that leaks across the page
+    // (apex at the fan anchor, following the curve it was meant to rasterise).
+    // Skip the pass and burn the view so the layers cannot reuse it either.
+    if (frame_buffer_ == nullptr || !bgfx::isValid(frame_buffer_->handle)) {
+      if (!reported_missing_atlas_) {
+        reported_missing_atlas_ = true;
+        VISAGE_LOG("PathAtlas: no framebuffer (%dx%d), skipping path rasterisation",
+                   atlas_map_.width(), atlas_map_.height());
+      }
+      return submit_pass + 1;
+    }
 
     if (!clearUpdatedPathAreas(submit_pass))
       return submit_pass;
@@ -878,10 +931,34 @@ namespace visage {
       frame_buffer_ = std::make_unique<PathAtlasTexture>();
 
     if (!bgfx::isValid(frame_buffer_->handle) && atlas_map_.width() && atlas_map_.height()) {
-      frame_buffer_->handle = bgfx::createFrameBuffer(atlas_map_.width(), atlas_map_.height(),
-                                                      bgfx::TextureFormat::R16F, kFlags);
-      width_ = atlas_map_.width();
-      height_ = atlas_map_.height();
+      // The atlas is an R16F render target: at 16k x 16k that is 512 MB and the
+      // driver refuses it, leaving an invalid handle (see updatePaths). Retry
+      // with progressively smaller packs until one is allocatable.
+      int atlas_width = atlas_map_.width();
+      int atlas_height = atlas_map_.height();
+      for (int attempt = 0; attempt < 8; ++attempt) {
+        frame_buffer_->handle = bgfx::createFrameBuffer(atlas_width, atlas_height,
+                                                        bgfx::TextureFormat::R16F, kFlags);
+        if (bgfx::isValid(frame_buffer_->handle))
+          break;
+        if (atlas_width <= 256 && atlas_height <= 256)
+          break;
+
+        atlas_width = std::max(256, atlas_width / 2);
+        atlas_height = std::max(256, atlas_height / 2);
+        atlas_map_.pack(atlas_width, atlas_height, std::min(atlas_width, atlas_height));
+        atlas_width = atlas_map_.width();
+        atlas_height = atlas_map_.height();
+        for (auto& path : paths_) {
+          const PackedRect& rect = atlas_map_.rectForId(path.get());
+          path->x = rect.x;
+          path->y = rect.y;
+          path->w = rect.w;
+          path->h = rect.h;
+        }
+      }
+      width_ = atlas_width;
+      height_ = atlas_height;
       // A fresh texture is blank, so every path (including retained ones that were
       // already uploaded) must be rasterised again.
       for (auto& path : paths_)
@@ -891,7 +968,13 @@ namespace visage {
 
   void PathAtlas::resize() {
     static constexpr float kShrinkFactor = 0.5f;
-    atlas_map_.pack(width_, height_);
+    // Cap the atlas side so the R16F render target stays allocatable; a refused
+    // framebuffer used to silently draw the rasterisation fans to the screen.
+    const uint32_t gpu_max = bgfx::getCaps()->limits.maxTextureSize;
+    // 8192 x 8192 R16F = 128 MB (the 24-band EQ page needs a big atlas); the
+    // 16k x 16k doubling step is 512 MB and drivers refuse it.
+    const int max_dimension = static_cast<int>(std::min<uint32_t>(8192u, gpu_max));
+    atlas_map_.pack(std::max(width_, 1), std::max(height_, 1), max_dimension);
     if (atlas_map_.width() > width_ || atlas_map_.height() > height_ ||
         atlas_map_.width() < width_ * kShrinkFactor || atlas_map_.height() < height_ * kShrinkFactor)
       frame_buffer_.reset();

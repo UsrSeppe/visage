@@ -124,8 +124,12 @@ namespace visage {
       lookup_.erase(id);
     }
 
-    void pack(int start_width = kDefaultWidth, int start_height = kDefaultWidth) {
-      static constexpr int kMaxDimension = 1 << 14;
+    /** Pack the rects. `max_dimension` caps the atlas side so the atlas texture
+     *  stays allocatable (a 16k x 16k R16F texture is 512 MB and drivers refuse
+     *  it). */
+    void pack(int start_width = kDefaultWidth, int start_height = kDefaultWidth,
+              int max_dimension = (1 << 14)) {
+      const int kMaxDimension = std::max(64, max_dimension);
 
       checkRemovedRects();
       if (packed_rects_.size() == 1) {
@@ -138,11 +142,13 @@ namespace visage {
         width_ = std::max(kDefaultWidth, start_width);
         height_ = std::max(kDefaultWidth, start_height);
 
-        while (width_ < kMaxDimension * 2 || height_ < kMaxDimension * 2) {
+        for (int attempt = 0; attempt < 16; ++attempt) {
           width_ = fixed_width_ ? fixed_width_ : std::min(kMaxDimension, width_);
           height_ = std::min(kMaxDimension, height_);
           if (packer_.pack(packed_rects_, width_, height_))
             return;
+          if (width_ >= kMaxDimension && height_ >= kMaxDimension)
+            break;
 
           width_ *= 2;
           height_ *= 2;
